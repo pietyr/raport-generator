@@ -12,12 +12,18 @@ const photos = ref<Photo[]>([])
 const error = ref('')
 const uploading = ref(false)
 const preparing = ref(false)
-const prepareNote = ref('')
-/** Bust cache after prepare finishes */
+const progressLabel = ref('')
+const progressDone = ref(0)
+const progressTotal = ref(0)
 const cacheKey = ref(Date.now())
 
+const progressPct = computed(() =>
+  progressTotal.value
+    ? Math.round((progressDone.value / progressTotal.value) * 100)
+    : 0,
+)
+
 async function load() {
-  error.value = ''
   try {
     ;[project.value, photos.value] = await Promise.all([
       api.getProject(id.value),
@@ -31,19 +37,22 @@ async function load() {
 async function preparePreviews() {
   if (!photos.value.length) return
   preparing.value = true
-  prepareNote.value = 'Przygotowuję podglądy (konwersja HEIC + miniatury)… to może chwilę potrwać przy pierwszym wejściu.'
-  error.value = ''
+  progressDone.value = 0
+  progressTotal.value = photos.value.length
+  progressLabel.value = 'Przygotowuję miniatury…'
   try {
     const res = await api.preparePhotos(id.value)
     cacheKey.value = Date.now()
+    progressDone.value = res.done
+    progressTotal.value = res.total
     if (res.errors?.length) {
-      error.value = `Nie udało się przygotować ${res.errors.length} plików:\n${res.errors.slice(0, 8).join('\n')}${res.errors.length > 8 ? '\n…' : ''}`
+      error.value = `Nie udało się przygotować ${res.errors.length} plików:\n${res.errors.slice(0, 10).join('\n')}${res.errors.length > 10 ? '\n…' : ''}`
     }
-    prepareNote.value = `Gotowe: ${res.done}/${res.total}`
+    progressLabel.value = `Miniatury gotowe: ${res.done}/${res.total}`
     await load()
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
-    prepareNote.value = ''
+    progressLabel.value = ''
   } finally {
     preparing.value = false
   }
@@ -51,19 +60,39 @@ async function preparePreviews() {
 
 async function onFiles(e: Event) {
   const input = e.target as HTMLInputElement
-  const files = input.files
-  if (!files?.length) return
+  const files = Array.from(input.files || [])
+  if (!files.length) return
+
   uploading.value = true
   error.value = ''
+  progressDone.value = 0
+  progressTotal.value = files.length
+  progressLabel.value = 'Wgrywanie zdjęć…'
+  const allErrors: string[] = []
+  let uploaded = 0
+
+  // Small batches: HEIC conversion is heavy; avoids one huge request timeout
+  const BATCH = 4
   try {
-    const res = await api.uploadPhotos(id.value, files)
-    if (res.errors?.length) {
-      error.value = `Część plików nie weszła:\n${res.errors.join('\n')}`
+    for (let i = 0; i < files.length; i += BATCH) {
+      const chunk = files.slice(i, i + BATCH)
+      progressLabel.value = `Wgrywanie ${Math.min(i + chunk.length, files.length)}/${files.length}…`
+      const res = await api.uploadPhotos(id.value, chunk)
+      uploaded += res.uploaded
+      progressDone.value = Math.min(i + chunk.length, files.length)
+      if (res.errors?.length) allErrors.push(...res.errors)
+      await load()
     }
     cacheKey.value = Date.now()
-    await load()
+    if (allErrors.length) {
+      error.value = `Dodano ${uploaded}/${files.length}. Błędy (${allErrors.length}):\n${allErrors.slice(0, 12).join('\n')}${allErrors.length > 12 ? '\n…' : ''}`
+    } else {
+      progressLabel.value = `Wgrano ${uploaded}/${files.length}. Przygotowuję miniatury…`
+    }
+    await preparePreviews()
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
+    progressLabel.value = ''
   } finally {
     uploading.value = false
     input.value = ''
@@ -77,12 +106,16 @@ function thumbSrc(photoId: string) {
 const tagged = computed(
   () => photos.value.filter((p) => p.category !== null || p.excluded === 1).length,
 )
+const busy = computed(() => uploading.value || preparing.value)
 
 onMounted(async () => {
+  error.value = ''
   await load()
   await preparePreviews()
 })
 watch(id, async () => {
+  error.value = ''
+  progressLabel.value = ''
   await load()
   await preparePreviews()
 })
@@ -102,17 +135,27 @@ watch(id, async () => {
           type="file"
           accept="image/*,.heic,.heif,image/heic,image/heif"
           multiple
+          :disabled="busy"
           @change="onFiles"
         />
       </label>
       <p class="muted" style="margin: 0; font-size: 0.85rem">
-        HEIC z iPhone’a są konwertowane do JPEG; lista pokazuje lekkie miniatury.
+        HEIC z iPhone’a są konwertowane do JPEG przy wgrywaniu. Przy dużej liczbie plików widać postęp poniżej.
       </p>
-      <p v-if="uploading" class="muted">Wgrywanie i przygotowywanie…</p>
-      <p v-if="preparing" class="muted">{{ prepareNote }}</p>
-      <p v-else-if="prepareNote" class="ok">{{ prepareNote }}</p>
+
+      <div v-if="busy || progressLabel" class="progress-block">
+        <div class="progress-meta">
+          <span>{{ progressLabel || 'Przetwarzanie…' }}</span>
+          <span v-if="progressTotal">{{ progressDone }}/{{ progressTotal }} ({{ progressPct }}%)</span>
+        </div>
+        <div class="progress-bar" aria-hidden="true">
+          <div class="progress-fill" :style="{ width: `${progressPct}%` }" />
+        </div>
+      </div>
+
       <p>
-        Otagowane: <strong>{{ tagged }}</strong> / {{ photos.length }}
+        W bazie: <strong>{{ photos.length }}</strong>
+        · otagowane: <strong>{{ tagged }}</strong> / {{ photos.length }}
       </p>
       <p v-if="error" class="error" style="white-space: pre-wrap">{{ error }}</p>
     </div>
@@ -138,7 +181,7 @@ watch(id, async () => {
       </button>
       <button
         class="btn accent"
-        :disabled="!photos.length || preparing || uploading"
+        :disabled="!photos.length || busy"
         @click="router.push(`/projects/${id}/tagging`)"
       >
         Tagowanie →
@@ -149,6 +192,29 @@ watch(id, async () => {
 </template>
 
 <style scoped>
+.progress-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.progress-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+.progress-bar {
+  height: 10px;
+  border-radius: 999px;
+  background: #e8e2da;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
 .thumbs {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));

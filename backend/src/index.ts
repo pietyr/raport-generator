@@ -22,11 +22,16 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PORT = Number(process.env.PORT || 3000)
 const isProd = process.env.NODE_ENV === 'production'
 
-const app = Fastify({ logger: true, bodyLimit: 100 * 1024 * 1024 })
+const app = Fastify({
+  logger: true,
+  bodyLimit: 512 * 1024 * 1024,
+  requestTimeout: 0,
+  connectionTimeout: 0,
+})
 
 await app.register(cors, { origin: true })
 await app.register(multipart, {
-  limits: { fileSize: 100 * 1024 * 1024, files: 200 },
+  limits: { fileSize: 100 * 1024 * 1024, files: 500 },
 })
 
 app.get('/api/health', async () => ({ ok: true }))
@@ -474,7 +479,8 @@ app.post<{ Params: { id: string } }>(
           const filename = `${id}${ext.toLowerCase()}`
           const dest = path.join(dir, filename)
           fs.writeFileSync(dest, buf)
-          const prepared = await preparePhotoDerivatives(dest, originalName)
+          // Pass stored filename (not original HEIC name) so derivatives don't re-decode
+          const prepared = await preparePhotoDerivatives(dest, filename)
           const relative = path.relative(projectDir(req.params.id), prepared.full)
           db.prepare(
             `INSERT INTO photos (id, project_id, path, original_name, category, excluded, tagged_at, created_at)
@@ -489,6 +495,7 @@ app.post<{ Params: { id: string } }>(
           created.push(id)
         })
       } catch (err) {
+        req.log.error({ err, originalName }, 'photo upload failed')
         errors.push(
           `${originalName}: ${err instanceof Error ? err.message : String(err)}`,
         )
