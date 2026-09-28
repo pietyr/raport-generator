@@ -184,6 +184,12 @@ export const api = {
       { method: 'POST' },
     ),
   backgroundUrl: (projectId: string) => `/api/projects/${projectId}/background`,
+  latestGenerate: (id: string) =>
+    request<{ exists: boolean; size?: number; updatedAt?: string }>(
+      `/api/projects/${id}/generate/latest`,
+    ),
+  latestGenerateDownloadUrl: (id: string) =>
+    `/api/projects/${id}/generate/latest/download`,
   startGenerate: (id: string) =>
     request<{
       jobId: string

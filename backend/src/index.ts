@@ -744,6 +744,43 @@ app.get<{ Params: { id: string } }>(
 
 // ——— Generate ———
 
+app.get<{ Params: { id: string } }>(
+  '/api/projects/:id/generate/latest',
+  async (req, reply) => {
+    if (!db.prepare('SELECT id FROM projects WHERE id = ?').get(req.params.id)) {
+      return reply.code(404).send({ error: 'Nie znaleziono' })
+    }
+    const zipPath = path.join(projectDir(req.params.id), 'output', 'raporty.zip')
+    if (!fs.existsSync(zipPath)) {
+      return { exists: false }
+    }
+    const st = fs.statSync(zipPath)
+    return {
+      exists: true,
+      size: st.size,
+      updatedAt: st.mtime.toISOString(),
+    }
+  },
+)
+
+app.get<{ Params: { id: string } }>(
+  '/api/projects/:id/generate/latest/download',
+  async (req, reply) => {
+    if (!db.prepare('SELECT id FROM projects WHERE id = ?').get(req.params.id)) {
+      return reply.code(404).send({ error: 'Nie znaleziono' })
+    }
+    const zipPath = path.join(projectDir(req.params.id), 'output', 'raporty.zip')
+    if (!fs.existsSync(zipPath)) {
+      return reply.code(404).send({ error: 'Brak wygenerowanego ZIP — najpierw wygeneruj raporty' })
+    }
+    const buf = fs.readFileSync(zipPath)
+    reply
+      .header('Content-Type', 'application/zip')
+      .header('Content-Disposition', 'attachment; filename="raporty.zip"')
+    return reply.send(buf)
+  },
+)
+
 app.post<{ Params: { id: string } }>(
   '/api/projects/:id/generate/start',
   async (req, reply) => {

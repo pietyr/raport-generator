@@ -11,6 +11,8 @@ const project = ref<Project | null>(null)
 const error = ref('')
 const generating = ref(false)
 const done = ref(false)
+const hasLatest = ref(false)
+const latestUpdatedAt = ref<string | null>(null)
 const progressDone = ref(0)
 const progressTotal = ref(0)
 const progressMessage = ref('')
@@ -22,14 +24,52 @@ const progressPct = computed(() =>
     : 0,
 )
 
+const generateButtonLabel = computed(() => {
+  if (generating.value) return 'Generowanie…'
+  if (hasLatest.value) return 'Wygeneruj ponownie'
+  return 'Wygeneruj raporty'
+})
+
+async function loadLatest() {
+  try {
+    const latest = await api.latestGenerate(id.value)
+    hasLatest.value = !!latest.exists
+    latestUpdatedAt.value = latest.updatedAt || null
+  } catch {
+    hasLatest.value = false
+    latestUpdatedAt.value = null
+  }
+}
+
 async function load() {
   project.value = await api.getProject(id.value)
+  await loadLatest()
 }
 
 function stopPoll() {
   if (pollTimer) {
     clearInterval(pollTimer)
     pollTimer = null
+  }
+}
+
+function triggerDownload(blob: Blob) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${project.value?.name || 'raporty'}.zip`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+async function downloadLatest() {
+  error.value = ''
+  try {
+    const res = await fetch(api.latestGenerateDownloadUrl(id.value))
+    if (!res.ok) throw new Error('Brak wygenerowanego ZIP')
+    triggerDownload(await res.blob())
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
   }
 }
 
@@ -71,15 +111,10 @@ async function generate() {
 
     const res = await fetch(api.generateDownloadUrl(id.value, started.jobId))
     if (!res.ok) throw new Error('Nie udało się pobrać ZIP')
-    const blob = await res.blob()
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `${project.value?.name || 'raporty'}.zip`
-    a.click()
-    URL.revokeObjectURL(url)
+    triggerDownload(await res.blob())
     done.value = true
     progressMessage.value = 'ZIP pobrany'
+    await loadLatest()
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
   } finally {
@@ -104,7 +139,7 @@ onUnmounted(stopPoll)
   <div v-if="project">
     <h1>Generuj raporty</h1>
     <p class="subtitle">
-      ZIP ze wszystkimi firmami (PPTX + PDF). Generowanie może potrwać — widać postęp poniżej.
+      ZIP ze wszystkimi firmami (PPTX + PDF). Możesz wygenerować od nowa albo pobrać ostatni ZIP.
     </p>
 
     <div class="card stack">
@@ -121,6 +156,16 @@ onUnmounted(stopPoll)
         </li>
         <li :class="{ ok: !!project.event_url }">
           URL wydarzenia: {{ project.event_url || 'pusty' }}
+        </li>
+        <li :class="{ ok: hasLatest }">
+          Ostatni ZIP:
+          <template v-if="hasLatest">
+            dostępny
+            <span v-if="latestUpdatedAt">
+              ({{ new Date(latestUpdatedAt).toLocaleString('pl-PL') }})
+            </span>
+          </template>
+          <template v-else>jeszcze nie wygenerowany</template>
         </li>
       </ul>
 
@@ -142,11 +187,19 @@ onUnmounted(stopPoll)
           ← Tagowanie
         </button>
         <button
+          v-if="hasLatest"
+          class="btn secondary"
+          :disabled="generating"
+          @click="downloadLatest"
+        >
+          Pobierz ostatni ZIP
+        </button>
+        <button
           class="btn accent"
           :disabled="!canGenerate || generating"
           @click="generate"
         >
-          {{ generating ? 'Generowanie…' : 'Pobierz ZIP raportów' }}
+          {{ generateButtonLabel }}
         </button>
       </div>
     </div>
