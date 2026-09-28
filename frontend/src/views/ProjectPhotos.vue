@@ -31,7 +31,10 @@ async function onFiles(e: Event) {
   uploading.value = true
   error.value = ''
   try {
-    await api.uploadPhotos(id.value, files)
+    const res = await api.uploadPhotos(id.value, files)
+    if (res.errors?.length) {
+      error.value = `Część plików nie weszła:\n${res.errors.join('\n')}`
+    }
     await load()
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
@@ -61,16 +64,19 @@ watch(id, load)
         Upload (wiele plików)
         <input
           type="file"
-          accept="image/*"
+          accept="image/*,.heic,.heif,image/heic,image/heif"
           multiple
           @change="onFiles"
         />
       </label>
+      <p class="muted" style="margin: 0; font-size: 0.85rem">
+        Pliki HEIC z iPhone’a są automatycznie konwertowane do JPEG (podgląd i raporty).
+      </p>
       <p v-if="uploading" class="muted">Wgrywanie…</p>
       <p>
         Otagowane: <strong>{{ tagged }}</strong> / {{ photos.length }}
       </p>
-      <p v-if="error" class="error">{{ error }}</p>
+      <p v-if="error" class="error" style="white-space: pre-wrap">{{ error }}</p>
     </div>
 
     <div class="card" style="margin-top: 1rem">

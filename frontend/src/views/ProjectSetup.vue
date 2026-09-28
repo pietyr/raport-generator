@@ -130,20 +130,28 @@ watch(id, load)
         </div>
       </div>
 
-      <div class="card">
-        <p class="muted" style="margin-top: 0">Podgląd slajdu tekstowego</p>
-        <div class="preview" :style="bgUrl ? { backgroundImage: `url(${bgUrl})` } : {}">
-          <div class="preview-title">{{ stats.title || 'Statystyki' }}</div>
-          <ul class="preview-body">
-            <li
-              v-for="(line, i) in stats.lines"
-              :key="i"
-              :class="{ bullet: line.type === 'bullet', plain: line.type === 'plain' }"
-            >
-              {{ line.text || '…' }}
-            </li>
-          </ul>
-          <div v-if="eventUrl" class="preview-link">{{ eventUrl }}</div>
+      <div class="stack">
+        <div class="card">
+          <p class="muted" style="margin-top: 0">1. Strona wydarzenia</p>
+          <div class="preview" :style="bgUrl ? { backgroundImage: `url(${bgUrl})` } : {}">
+            <div class="preview-title">Strona wydarzenia</div>
+            <div class="preview-link">{{ eventUrl || 'https://…' }}</div>
+          </div>
+        </div>
+        <div class="card">
+          <p class="muted" style="margin-top: 0">2. Statystyki</p>
+          <div class="preview" :style="bgUrl ? { backgroundImage: `url(${bgUrl})` } : {}">
+            <div class="preview-title">{{ stats.title || 'Statystyki' }}</div>
+            <ul class="preview-body">
+              <li
+                v-for="(line, i) in stats.lines"
+                :key="i"
+                :class="{ bullet: line.type === 'bullet', plain: line.type === 'plain' }"
+              >
+                {{ line.text || '…' }}
+              </li>
+            </ul>
+          </div>
         </div>
       </div>
     </div>
@@ -184,7 +192,6 @@ watch(id, load)
   margin-bottom: 0.25rem;
 }
 .preview-link {
-  margin-top: 1rem;
   color: #0563c1;
   font-size: clamp(0.65rem, 1.4vw, 0.9rem);
   word-break: break-all;

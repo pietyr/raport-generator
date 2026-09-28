@@ -10,6 +10,7 @@ import { db, DATA_DIR, projectDir, UPLOADS_DIR, withTransaction } from './db.js'
 import { defaultStats, PHOTO_CATEGORIES, type StatsContent } from './types.js'
 import { extractTemplateBackground } from './template.js'
 import { generateReportsZip } from './generate.js'
+import { heicToJpeg, isHeic, ensureJpegPath } from './heic.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PORT = Number(process.env.PORT || 3000)
@@ -450,13 +451,28 @@ app.post<{ Params: { id: string } }>(
 
     const parts = req.files()
     const created: string[] = []
+    const errors: string[] = []
     for await (const part of parts) {
       if (!part.file) continue
       const id = randomUUID()
-      const ext = path.extname(part.filename || '') || '.jpg'
-      const filename = `${id}${ext}`
+      const originalName = part.filename || `${id}.jpg`
+      let buf = await part.toBuffer()
+      let ext = path.extname(originalName) || '.jpg'
+
+      try {
+        if (isHeic(originalName, buf)) {
+          buf = await heicToJpeg(buf)
+          ext = '.jpg'
+        }
+      } catch (err) {
+        errors.push(
+          `${originalName}: ${err instanceof Error ? err.message : String(err)}`,
+        )
+        continue
+      }
+
+      const filename = `${id}${ext.toLowerCase()}`
       const dest = path.join(dir, filename)
-      const buf = await part.toBuffer()
       fs.writeFileSync(dest, buf)
       const relative = path.join('photos', filename)
       db.prepare(
@@ -466,14 +482,18 @@ app.post<{ Params: { id: string } }>(
         id,
         req.params.id,
         relative,
-        part.filename || filename,
+        originalName,
         new Date().toISOString(),
       )
       created.push(id)
     }
     touch(req.params.id)
     reply.code(201)
-    return { uploaded: created.length, ids: created }
+    return {
+      uploaded: created.length,
+      ids: created,
+      errors: errors.length ? errors : undefined,
+    }
   },
 )
 
@@ -483,18 +503,32 @@ app.get<{ Params: { id: string; photoId: string } }>(
     const photo = db
       .prepare('SELECT * FROM photos WHERE id = ? AND project_id = ?')
       .get(req.params.photoId, req.params.id) as
-      | { path: string; original_name: string }
+      | { id: string; path: string; original_name: string }
       | undefined
     if (!photo) return reply.code(404).send({ error: 'Nie znaleziono' })
-    const abs = path.join(projectDir(req.params.id), photo.path)
+    let abs = path.join(projectDir(req.params.id), photo.path)
     if (!fs.existsSync(abs)) return reply.code(404).send({ error: 'Brak pliku' })
-    const ext = path.extname(abs).toLowerCase()
+
+    // Lazily convert already-uploaded HEIC so existing projects get previews too
+    try {
+      const jpegAbs = await ensureJpegPath(abs, photo.original_name)
+      if (jpegAbs !== abs) {
+        const jpegRel = path.relative(projectDir(req.params.id), jpegAbs)
+        db.prepare('UPDATE photos SET path = ? WHERE id = ?').run(jpegRel, photo.id)
+        abs = jpegAbs
+      }
+    } catch (err) {
+      req.log.error(err)
+      return reply.code(415).send({ error: 'Nie udało się odczytać pliku HEIC' })
+    }
+
+    const outExt = path.extname(abs).toLowerCase()
     const type =
-      ext === '.png'
+      outExt === '.png'
         ? 'image/png'
-        : ext === '.webp'
+        : outExt === '.webp'
           ? 'image/webp'
-          : ext === '.gif'
+          : outExt === '.gif'
             ? 'image/gif'
             : 'image/jpeg'
     reply.type(type)

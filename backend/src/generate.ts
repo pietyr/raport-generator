@@ -20,6 +20,7 @@ type PptxSlide = {
 const PptxGenJS = PptxGenJSImport as unknown as { new (): PptxPres }
 import AdmZip from 'adm-zip'
 import { db, projectDir } from './db.js'
+import { ensureJpegPath } from './heic.js'
 import type {
   PartnerRow,
   PhotoRow,
@@ -115,6 +116,16 @@ function absolutePhotoPath(projectId: string, relativePath: string) {
   return path.isAbsolute(relativePath)
     ? relativePath
     : path.join(projectDir(projectId), relativePath)
+}
+
+async function resolvePhotoPath(projectId: string, photo: PhotoWithAssignments) {
+  const abs = absolutePhotoPath(projectId, photo.path)
+  const jpeg = await ensureJpegPath(abs, photo.original_name)
+  if (jpeg !== abs) {
+    const rel = path.relative(projectDir(projectId), jpeg)
+    db.prepare('UPDATE photos SET path = ? WHERE id = ?').run(rel, photo.id)
+  }
+  return jpeg
 }
 
 function containBox(
@@ -291,7 +302,7 @@ async function buildPartnerPptx(opts: {
   // Category 1 banners first (cover)
   for (const photo of sorted.filter((p) => p.category === 1)) {
     await addImageSlide(pptx, {
-      imagePath: absolutePhotoPath(opts.project.id, photo.path),
+      imagePath: await resolvePhotoPath(opts.project.id, photo),
       backgroundPath: opts.backgroundPath,
       cover: true,
     })
@@ -302,7 +313,7 @@ async function buildPartnerPptx(opts: {
 
   for (const photo of sorted.filter((p) => p.category !== 1 && p.category !== 15)) {
     await addImageSlide(pptx, {
-      imagePath: absolutePhotoPath(opts.project.id, photo.path),
+      imagePath: await resolvePhotoPath(opts.project.id, photo),
       backgroundPath: opts.backgroundPath,
       cover: false,
     })
@@ -310,7 +321,7 @@ async function buildPartnerPptx(opts: {
 
   for (const photo of sorted.filter((p) => p.category === 15)) {
     await addImageSlide(pptx, {
-      imagePath: absolutePhotoPath(opts.project.id, photo.path),
+      imagePath: await resolvePhotoPath(opts.project.id, photo),
       backgroundPath: opts.backgroundPath,
       cover: true,
     })

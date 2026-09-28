@@ -142,10 +142,13 @@ export const api = {
   uploadPhotos: async (id: string, files: FileList | File[]) => {
     const fd = new FormData()
     for (const f of Array.from(files)) fd.append('files', f)
-    return request<{ uploaded: number }>(`/api/projects/${id}/photos`, {
-      method: 'POST',
-      body: fd,
-    })
+    return request<{ uploaded: number; errors?: string[] }>(
+      `/api/projects/${id}/photos`,
+      {
+        method: 'POST',
+        body: fd,
+      },
+    )
   },
   tagPhoto: (
     id: string,
