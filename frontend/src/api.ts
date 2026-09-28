@@ -184,18 +184,25 @@ export const api = {
       { method: 'POST' },
     ),
   backgroundUrl: (projectId: string) => `/api/projects/${projectId}/background`,
-  generate: async (id: string) => {
-    const res = await fetch(`/api/projects/${id}/generate`, { method: 'POST' })
-    if (!res.ok) {
-      let msg = res.statusText
-      try {
-        const body = await res.json()
-        msg = body.error || msg
-      } catch {
-        /* ignore */
-      }
-      throw new Error(msg)
-    }
-    return res.blob()
-  },
+  startGenerate: (id: string) =>
+    request<{
+      jobId: string
+      status: string
+      done: number
+      total: number
+      phase: string
+      message: string
+    }>(`/api/projects/${id}/generate/start`, { method: 'POST' }),
+  generateStatus: (id: string, jobId: string) =>
+    request<{
+      jobId: string
+      status: 'running' | 'done' | 'error'
+      done: number
+      total: number
+      phase: string
+      message: string
+      error?: string
+    }>(`/api/projects/${id}/generate/jobs/${jobId}`),
+  generateDownloadUrl: (id: string, jobId: string) =>
+    `/api/projects/${id}/generate/jobs/${jobId}/download`,
 }

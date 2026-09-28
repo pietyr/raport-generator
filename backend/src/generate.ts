@@ -1,23 +1,9 @@
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { imageSize } from 'image-size'
-// pptxgenjs ships awkward CJS/namespace typings under NodeNext
 import PptxGenJSImport from 'pptxgenjs'
-
-type PptxPres = {
-  defineLayout: (l: { name: string; width: number; height: number }) => void
-  layout: string
-  author: string
-  title: string
-  addSlide: () => PptxSlide
-  writeFile: (opts: { fileName: string }) => Promise<string>
-}
-type PptxSlide = {
-  addImage: (opts: Record<string, unknown>) => void
-  addText: (text: unknown, opts?: Record<string, unknown>) => void
-}
-const PptxGenJS = PptxGenJSImport as unknown as { new (): PptxPres }
 import AdmZip from 'adm-zip'
 import { db, projectDir } from './db.js'
 import { preparePhotoDerivatives } from './images.js'
@@ -32,9 +18,31 @@ import type {
 const SLIDE_W = 13.333
 const SLIDE_H = 7.5
 
+type PptxPres = {
+  defineLayout: (l: { name: string; width: number; height: number }) => void
+  layout: string
+  author: string
+  title: string
+  addSlide: () => PptxSlide
+  writeFile: (opts: { fileName: string }) => Promise<string>
+}
+type PptxSlide = {
+  background?: { color: string }
+  addImage: (opts: Record<string, unknown>) => void
+  addText: (text: unknown, opts?: Record<string, unknown>) => void
+}
+const PptxGenJS = PptxGenJSImport as unknown as { new (): PptxPres }
+
 type PhotoWithAssignments = PhotoRow & {
   partnerIds: string[]
   tierIds: string[]
+}
+
+export type GenerateProgress = {
+  done: number
+  total: number
+  phase: string
+  message: string
 }
 
 function naturalCompare(a: string, b: string) {
@@ -89,7 +97,6 @@ function belongsToPartner(photo: PhotoWithAssignments, partner: PartnerRow) {
   return false
 }
 
-/** Within cat 13/14: collective (tiers only) → company → none */
 function splitSortKey(photo: PhotoWithAssignments): number {
   const hasTiers = photo.tierIds.length > 0
   const hasPartners = photo.partnerIds.length > 0
@@ -140,24 +147,13 @@ function containBox(
   return { x: (boxW - w) / 2, y: (boxH - h) / 2, w, h }
 }
 
+/** Photo slides: explicit white background (as in PowerPoint), never template bg. */
 async function addImageSlide(
   pptx: PptxPres,
-  opts: {
-    imagePath: string
-    backgroundPath: string | null
-    cover: boolean
-  },
+  opts: { imagePath: string; cover: boolean },
 ) {
   const slide = pptx.addSlide()
-  if (!opts.cover && opts.backgroundPath && fs.existsSync(opts.backgroundPath)) {
-    slide.addImage({
-      path: opts.backgroundPath,
-      x: 0,
-      y: 0,
-      w: SLIDE_W,
-      h: SLIDE_H,
-    })
-  }
+  slide.background = { color: 'FFFFFF' }
 
   if (opts.cover) {
     slide.addImage({
@@ -194,6 +190,7 @@ function addEventPageSlide(
   eventUrl: string,
 ) {
   const slide = pptx.addSlide()
+  slide.background = { color: 'FFFFFF' }
   if (backgroundPath && fs.existsSync(backgroundPath)) {
     slide.addImage({
       path: backgroundPath,
@@ -235,6 +232,7 @@ function addStatsSlide(
   stats: StatsContent,
 ) {
   const slide = pptx.addSlide()
+  slide.background = { color: 'FFFFFF' }
   if (backgroundPath && fs.existsSync(backgroundPath)) {
     slide.addImage({
       path: backgroundPath,
@@ -299,11 +297,9 @@ async function buildPartnerPptx(opts: {
     opts.photos.filter((p) => belongsToPartner(p, opts.partner)),
   )
 
-  // Category 1 banners first (cover)
   for (const photo of sorted.filter((p) => p.category === 1)) {
     await addImageSlide(pptx, {
       imagePath: await resolvePhotoPath(opts.project.id, photo),
-      backgroundPath: opts.backgroundPath,
       cover: true,
     })
   }
@@ -314,7 +310,6 @@ async function buildPartnerPptx(opts: {
   for (const photo of sorted.filter((p) => p.category !== 1 && p.category !== 15)) {
     await addImageSlide(pptx, {
       imagePath: await resolvePhotoPath(opts.project.id, photo),
-      backgroundPath: opts.backgroundPath,
       cover: false,
     })
   }
@@ -322,7 +317,6 @@ async function buildPartnerPptx(opts: {
   for (const photo of sorted.filter((p) => p.category === 15)) {
     await addImageSlide(pptx, {
       imagePath: await resolvePhotoPath(opts.project.id, photo),
-      backgroundPath: opts.backgroundPath,
       cover: true,
     })
   }
@@ -330,24 +324,44 @@ async function buildPartnerPptx(opts: {
   await pptx.writeFile({ fileName: opts.outPath })
 }
 
+function findSoffice(): string {
+  if (process.env.LIBREOFFICE_PATH) return process.env.LIBREOFFICE_PATH
+  for (const p of [
+    '/usr/bin/soffice',
+    '/usr/bin/libreoffice',
+    '/usr/lib/libreoffice/program/soffice',
+  ]) {
+    if (fs.existsSync(p)) return p
+  }
+  return 'soffice'
+}
+
 function convertPptxToPdf(pptxPath: string, outDir: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const soffice =
-      process.env.LIBREOFFICE_PATH ||
-      (fs.existsSync('/usr/bin/soffice') ? '/usr/bin/soffice' : 'soffice')
-
+    const soffice = findSoffice()
+    const profile = path.join('/tmp', `lo_profile_${randomUUID()}`)
     const args = [
       '--headless',
+      '--nologo',
+      '--nofirststartwizard',
       '--norestore',
+      `-env:UserInstallation=file://${profile}`,
       '--convert-to',
-      'pdf',
+      'pdf:impress_pdf_Export',
       '--outdir',
       outDir,
       pptxPath,
     ]
 
-    const child = spawn(soffice, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(soffice, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, HOME: '/tmp', LANG: 'C.UTF-8' },
+    })
     let stderr = ''
+    let stdout = ''
+    child.stdout.on('data', (d) => {
+      stdout += d.toString()
+    })
     child.stderr.on('data', (d) => {
       stderr += d.toString()
     })
@@ -359,12 +373,13 @@ function convertPptxToPdf(pptxPath: string, outDir: string): Promise<string> {
       )
     })
     child.on('close', (code) => {
+      fs.rmSync(profile, { recursive: true, force: true })
       const base = path.basename(pptxPath, path.extname(pptxPath))
       const pdfPath = path.join(outDir, `${base}.pdf`)
       if (code !== 0 || !fs.existsSync(pdfPath)) {
         reject(
           new Error(
-            `Konwersja PDF nie powiodła się (kod ${code}). ${stderr || 'Brak LibreOffice?'}`,
+            `Konwersja PDF nie powiodła się (kod ${code}). ${stderr || stdout || 'sprawdź LibreOffice w kontenerze'}`,
           ),
         )
         return
@@ -378,7 +393,10 @@ function safeFileName(name: string) {
   return name.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').trim() || 'partner'
 }
 
-export async function generateReportsZip(projectId: string): Promise<string> {
+export async function generateReportsZip(
+  projectId: string,
+  onProgress?: (p: GenerateProgress) => void,
+): Promise<string> {
   const project = db
     .prepare('SELECT * FROM projects WHERE id = ?')
     .get(projectId) as ProjectRow | undefined
@@ -399,10 +417,21 @@ export async function generateReportsZip(projectId: string): Promise<string> {
 
   const zip = new AdmZip()
   const errors: string[] = []
+  // Each partner: PPTX + PDF
+  const total = partners.length * 2
+  let done = 0
+
+  const report = (phase: string, message: string) => {
+    onProgress?.({ done, total, phase, message })
+  }
+
+  report('start', `Start generowania dla ${partners.length} firm…`)
 
   for (const partner of partners) {
     const base = safeFileName(partner.name)
     const pptxPath = path.join(outRoot, `${base}.pptx`)
+
+    report('pptx', `PPTX: ${partner.name}`)
     await buildPartnerPptx({
       project,
       partner,
@@ -412,7 +441,10 @@ export async function generateReportsZip(projectId: string): Promise<string> {
       outPath: pptxPath,
     })
     zip.addLocalFile(pptxPath)
+    done += 1
+    report('pptx', `PPTX gotowe: ${partner.name}`)
 
+    report('pdf', `PDF: ${partner.name}`)
     try {
       const pdfPath = await convertPptxToPdf(pptxPath, outRoot)
       zip.addLocalFile(pdfPath)
@@ -421,6 +453,8 @@ export async function generateReportsZip(projectId: string): Promise<string> {
         `${partner.name}: ${err instanceof Error ? err.message : String(err)}`,
       )
     }
+    done += 1
+    report('pdf', `PDF gotowe: ${partner.name}`)
   }
 
   if (errors.length > 0) {
@@ -433,8 +467,10 @@ export async function generateReportsZip(projectId: string): Promise<string> {
     )
   }
 
+  report('zip', 'Pakowanie ZIP…')
   const zipPath = path.join(outRoot, 'raporty.zip')
   zip.writeZip(zipPath)
+  report('done', 'Gotowe')
   return zipPath
 }
 

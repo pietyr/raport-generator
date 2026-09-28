@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api, type Project } from '../api'
 
@@ -11,17 +11,67 @@ const project = ref<Project | null>(null)
 const error = ref('')
 const generating = ref(false)
 const done = ref(false)
+const progressDone = ref(0)
+const progressTotal = ref(0)
+const progressMessage = ref('')
+let pollTimer: ReturnType<typeof setInterval> | null = null
+
+const progressPct = computed(() =>
+  progressTotal.value
+    ? Math.round((progressDone.value / progressTotal.value) * 100)
+    : 0,
+)
 
 async function load() {
   project.value = await api.getProject(id.value)
+}
+
+function stopPoll() {
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
 }
 
 async function generate() {
   generating.value = true
   error.value = ''
   done.value = false
+  progressDone.value = 0
+  progressTotal.value = 0
+  progressMessage.value = 'Uruchamianie…'
+  stopPoll()
+
   try {
-    const blob = await api.generate(id.value)
+    const started = await api.startGenerate(id.value)
+    progressMessage.value = started.message
+    progressDone.value = started.done
+    progressTotal.value = started.total
+
+    await new Promise<void>((resolve, reject) => {
+      pollTimer = setInterval(async () => {
+        try {
+          const st = await api.generateStatus(id.value, started.jobId)
+          progressDone.value = st.done
+          progressTotal.value = st.total
+          progressMessage.value = st.message
+          if (st.status === 'done') {
+            stopPoll()
+            resolve()
+          } else if (st.status === 'error') {
+            stopPoll()
+            reject(new Error(st.error || st.message || 'Błąd generowania'))
+          }
+        } catch (e) {
+          stopPoll()
+          reject(e)
+        }
+      }, 800)
+    })
+
+    const res = await fetch(api.generateDownloadUrl(id.value, started.jobId))
+    if (!res.ok) throw new Error('Nie udało się pobrać ZIP')
+    const blob = await res.blob()
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
@@ -29,9 +79,11 @@ async function generate() {
     a.click()
     URL.revokeObjectURL(url)
     done.value = true
+    progressMessage.value = 'ZIP pobrany'
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
   } finally {
+    stopPoll()
     generating.value = false
   }
 }
@@ -45,13 +97,14 @@ const canGenerate = computed(
 
 onMounted(load)
 watch(id, load)
+onUnmounted(stopPoll)
 </script>
 
 <template>
   <div v-if="project">
     <h1>Generuj raporty</h1>
     <p class="subtitle">
-      Jeden ZIP ze wszystkimi firmami (PPTX + PDF). Brak LibreOffice = tylko PPTX + plik z błędami PDF.
+      ZIP ze wszystkimi firmami (PPTX + PDF). Generowanie może potrwać — widać postęp poniżej.
     </p>
 
     <div class="card stack">
@@ -70,6 +123,16 @@ watch(id, load)
           URL wydarzenia: {{ project.event_url || 'pusty' }}
         </li>
       </ul>
+
+      <div v-if="generating || progressMessage" class="progress-block">
+        <div class="progress-meta">
+          <span>{{ progressMessage || 'Generowanie…' }}</span>
+          <span v-if="progressTotal">{{ progressDone }}/{{ progressTotal }} ({{ progressPct }}%)</span>
+        </div>
+        <div class="progress-bar">
+          <div class="progress-fill" :style="{ width: `${progressPct}%` }" />
+        </div>
+      </div>
 
       <p v-if="error" class="error">{{ error }}</p>
       <p v-if="done" class="ok">Pobieranie rozpoczęte.</p>
@@ -102,5 +165,28 @@ watch(id, load)
 }
 .checklist li.ok {
   color: var(--ok);
+}
+.progress-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.progress-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+.progress-bar {
+  height: 10px;
+  border-radius: 999px;
+  background: #e8e2da;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.25s ease;
 }
 </style>

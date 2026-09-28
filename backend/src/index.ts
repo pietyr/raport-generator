@@ -10,6 +10,7 @@ import { db, DATA_DIR, projectDir, UPLOADS_DIR, withTransaction } from './db.js'
 import { defaultStats, PHOTO_CATEGORIES, type StatsContent } from './types.js'
 import { extractTemplateBackground } from './template.js'
 import { generateReportsZip } from './generate.js'
+import { getJob, startGenerateJob } from './jobs.js'
 import { heicToJpeg, isHeic } from './heic.js'
 import {
   preparePhotoDerivatives,
@@ -744,6 +745,62 @@ app.get<{ Params: { id: string } }>(
 // ——— Generate ———
 
 app.post<{ Params: { id: string } }>(
+  '/api/projects/:id/generate/start',
+  async (req, reply) => {
+    if (!db.prepare('SELECT id FROM projects WHERE id = ?').get(req.params.id)) {
+      return reply.code(404).send({ error: 'Nie znaleziono' })
+    }
+    const job = startGenerateJob(req.params.id)
+    return {
+      jobId: job.id,
+      status: job.status,
+      done: job.done,
+      total: job.total,
+      phase: job.phase,
+      message: job.message,
+    }
+  },
+)
+
+app.get<{ Params: { id: string; jobId: string } }>(
+  '/api/projects/:id/generate/jobs/:jobId',
+  async (req, reply) => {
+    const job = getJob(req.params.jobId)
+    if (!job || job.projectId !== req.params.id) {
+      return reply.code(404).send({ error: 'Nie znaleziono zadania' })
+    }
+    return {
+      jobId: job.id,
+      status: job.status,
+      done: job.done,
+      total: job.total,
+      phase: job.phase,
+      message: job.message,
+      error: job.error,
+    }
+  },
+)
+
+app.get<{ Params: { id: string; jobId: string } }>(
+  '/api/projects/:id/generate/jobs/:jobId/download',
+  async (req, reply) => {
+    const job = getJob(req.params.jobId)
+    if (!job || job.projectId !== req.params.id) {
+      return reply.code(404).send({ error: 'Nie znaleziono zadania' })
+    }
+    if (job.status !== 'done' || !job.zipPath || !fs.existsSync(job.zipPath)) {
+      return reply.code(409).send({ error: 'ZIP jeszcze niegotowy' })
+    }
+    const buf = fs.readFileSync(job.zipPath)
+    reply
+      .header('Content-Type', 'application/zip')
+      .header('Content-Disposition', 'attachment; filename="raporty.zip"')
+    return reply.send(buf)
+  },
+)
+
+/** Legacy sync endpoint (kept for compatibility). Prefer /generate/start. */
+app.post<{ Params: { id: string } }>(
   '/api/projects/:id/generate',
   async (req, reply) => {
     if (!db.prepare('SELECT id FROM projects WHERE id = ?').get(req.params.id)) {
@@ -754,10 +811,7 @@ app.post<{ Params: { id: string } }>(
       const buf = fs.readFileSync(zipPath)
       reply
         .header('Content-Type', 'application/zip')
-        .header(
-          'Content-Disposition',
-          'attachment; filename="raporty.zip"',
-        )
+        .header('Content-Disposition', 'attachment; filename="raporty.zip"')
       return reply.send(buf)
     } catch (err) {
       req.log.error(err)
