@@ -20,7 +20,7 @@ type PptxSlide = {
 const PptxGenJS = PptxGenJSImport as unknown as { new (): PptxPres }
 import AdmZip from 'adm-zip'
 import { db, projectDir } from './db.js'
-import { ensureJpegPath } from './heic.js'
+import { preparePhotoDerivatives } from './images.js'
 import type {
   PartnerRow,
   PhotoRow,
@@ -120,12 +120,12 @@ function absolutePhotoPath(projectId: string, relativePath: string) {
 
 async function resolvePhotoPath(projectId: string, photo: PhotoWithAssignments) {
   const abs = absolutePhotoPath(projectId, photo.path)
-  const jpeg = await ensureJpegPath(abs, photo.original_name)
-  if (jpeg !== abs) {
-    const rel = path.relative(projectDir(projectId), jpeg)
+  const prepared = await preparePhotoDerivatives(abs, photo.original_name)
+  if (prepared.full !== abs) {
+    const rel = path.relative(projectDir(projectId), prepared.full)
     db.prepare('UPDATE photos SET path = ? WHERE id = ?').run(rel, photo.id)
   }
-  return jpeg
+  return prepared.full
 }
 
 function containBox(

@@ -15,10 +15,18 @@ const tagged = ref(0)
 const remaining = ref(0)
 const error = ref('')
 const saving = ref(false)
+const imgError = ref('')
+const imgLoaded = ref(false)
 
 const category = ref<number | null>(null)
 const partnerIds = ref<string[]>([])
 const tierIds = ref<string[]>([])
+
+const previewSrc = computed(() =>
+  current.value
+    ? `${api.photoUrl(id.value, current.value.id, 'preview')}&t=${current.value.id}`
+    : '',
+)
 
 async function loadMeta() {
   ;[project.value, categories.value] = await Promise.all([
@@ -29,6 +37,8 @@ async function loadMeta() {
 
 async function loadNext() {
   error.value = ''
+  imgError.value = ''
+  imgLoaded.value = false
   const res = await api.nextUntagged(id.value)
   total.value = res.total
   tagged.value = res.tagged
@@ -98,24 +108,38 @@ watch(id, async () => {
 </script>
 
 <template>
-  <div v-if="project">
-    <h1>Tagowanie</h1>
-    <p class="subtitle">
-      Postęp: {{ tagged }} / {{ total }}
-      <span v-if="remaining">· pozostało {{ remaining }}</span>
-    </p>
+  <div v-if="project" class="tag-page">
+    <div class="tag-head">
+      <div>
+        <h1>Tagowanie</h1>
+        <p class="subtitle">
+          Postęp: {{ tagged }} / {{ total }}
+          <span v-if="remaining">· pozostało {{ remaining }}</span>
+        </p>
+      </div>
+      <button class="btn secondary" @click="router.push(`/projects/${id}/photos`)">
+        ← Zdjęcia
+      </button>
+    </div>
 
-    <div v-if="current" class="grid-2">
-      <div class="card">
-        <img
-          class="big"
-          :src="api.photoUrl(id, current.id)"
-          :alt="current.original_name"
-        />
-        <p class="muted" style="margin-bottom: 0">{{ current.original_name }}</p>
+    <div v-if="current" class="tag-layout">
+      <div class="viewer card">
+        <p class="filename">{{ current.original_name }}</p>
+        <div class="stage">
+          <p v-if="!imgLoaded && !imgError" class="muted stage-msg">Ładowanie podglądu…</p>
+          <p v-if="imgError" class="error stage-msg">{{ imgError }}</p>
+          <img
+            v-show="imgLoaded"
+            class="hero"
+            :src="previewSrc"
+            :alt="current.original_name"
+            @load="imgLoaded = true"
+            @error="imgError = 'Nie udało się wczytać podglądu tego zdjęcia (możliwy uszkodzony HEIC). Możesz je pominąć.'"
+          />
+        </div>
       </div>
 
-      <div class="stack">
+      <aside class="controls stack">
         <div class="card stack">
           <strong>Typ zdjęcia</strong>
           <div class="cats">
@@ -154,7 +178,7 @@ watch(id, async () => {
             </button>
           </div>
           <p class="muted" style="margin: 0; font-size: 0.85rem">
-            Bez wyboru = zdjęcie globalne (we wszystkich raportach). Możesz wybrać firmy i/lub całe stopnie.
+            Bez wyboru = zdjęcie globalne (we wszystkich raportach).
           </p>
         </div>
 
@@ -167,7 +191,7 @@ watch(id, async () => {
             Zapisz i dalej
           </button>
         </div>
-      </div>
+      </aside>
     </div>
 
     <div v-else class="card stack">
@@ -176,27 +200,74 @@ watch(id, async () => {
         Przejdź do generowania →
       </button>
     </div>
-
-    <div class="row" style="margin-top: 1rem">
-      <button class="btn secondary" @click="router.push(`/projects/${id}/photos`)">← Zdjęcia</button>
-    </div>
   </div>
   <p v-else class="muted">Ładowanie…</p>
 </template>
 
 <style scoped>
-.big {
-  width: 100%;
-  max-height: 70vh;
-  object-fit: contain;
+.tag-page {
+  width: min(1400px, calc(100vw - 1.5rem));
+  margin: 0 auto;
+}
+.tag-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
+.tag-head h1 {
+  margin-bottom: 0.2rem;
+}
+.tag-head .subtitle {
+  margin-bottom: 0;
+}
+.tag-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
+  gap: 1rem;
+  align-items: start;
+}
+.viewer {
+  padding: 0.75rem;
+}
+.filename {
+  margin: 0 0 0.5rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+  word-break: break-all;
+}
+.stage {
+  position: relative;
+  min-height: min(78vh, 900px);
   background: #111;
-  border-radius: 8px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.stage-msg {
+  position: absolute;
+  z-index: 1;
+  padding: 1rem;
+  text-align: center;
+}
+.hero {
+  display: block;
+  width: 100%;
+  height: min(78vh, 900px);
+  object-fit: contain;
+}
+.controls {
+  position: sticky;
+  top: 4.5rem;
 }
 .cats {
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
-  max-height: 280px;
+  max-height: 36vh;
   overflow: auto;
 }
 .cat {
@@ -224,5 +295,18 @@ watch(id, async () => {
   border-color: var(--accent);
   color: var(--accent);
   font-weight: 600;
+}
+@media (max-width: 960px) {
+  .tag-layout {
+    grid-template-columns: 1fr;
+  }
+  .controls {
+    position: static;
+  }
+  .stage,
+  .hero {
+    min-height: 50vh;
+    height: 50vh;
+  }
 }
 </style>

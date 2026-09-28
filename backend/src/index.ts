@@ -10,7 +10,13 @@ import { db, DATA_DIR, projectDir, UPLOADS_DIR, withTransaction } from './db.js'
 import { defaultStats, PHOTO_CATEGORIES, type StatsContent } from './types.js'
 import { extractTemplateBackground } from './template.js'
 import { generateReportsZip } from './generate.js'
-import { heicToJpeg, isHeic, ensureJpegPath } from './heic.js'
+import { heicToJpeg, isHeic } from './heic.js'
+import {
+  preparePhotoDerivatives,
+  resolvePhotoVariant,
+  withImageQueue,
+  type PhotoVariant,
+} from './images.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PORT = Number(process.env.PORT || 3000)
@@ -460,32 +466,33 @@ app.post<{ Params: { id: string } }>(
       let ext = path.extname(originalName) || '.jpg'
 
       try {
-        if (isHeic(originalName, buf)) {
-          buf = await heicToJpeg(buf)
-          ext = '.jpg'
-        }
+        await withImageQueue(async () => {
+          if (isHeic(originalName, buf)) {
+            buf = await heicToJpeg(buf)
+            ext = '.jpg'
+          }
+          const filename = `${id}${ext.toLowerCase()}`
+          const dest = path.join(dir, filename)
+          fs.writeFileSync(dest, buf)
+          const prepared = await preparePhotoDerivatives(dest, originalName)
+          const relative = path.relative(projectDir(req.params.id), prepared.full)
+          db.prepare(
+            `INSERT INTO photos (id, project_id, path, original_name, category, excluded, tagged_at, created_at)
+             VALUES (?, ?, ?, ?, NULL, 0, NULL, ?)`,
+          ).run(
+            id,
+            req.params.id,
+            relative,
+            originalName,
+            new Date().toISOString(),
+          )
+          created.push(id)
+        })
       } catch (err) {
         errors.push(
           `${originalName}: ${err instanceof Error ? err.message : String(err)}`,
         )
-        continue
       }
-
-      const filename = `${id}${ext.toLowerCase()}`
-      const dest = path.join(dir, filename)
-      fs.writeFileSync(dest, buf)
-      const relative = path.join('photos', filename)
-      db.prepare(
-        `INSERT INTO photos (id, project_id, path, original_name, category, excluded, tagged_at, created_at)
-         VALUES (?, ?, ?, ?, NULL, 0, NULL, ?)`,
-      ).run(
-        id,
-        req.params.id,
-        relative,
-        originalName,
-        new Date().toISOString(),
-      )
-      created.push(id)
     }
     touch(req.params.id)
     reply.code(201)
@@ -497,44 +504,86 @@ app.post<{ Params: { id: string } }>(
   },
 )
 
-app.get<{ Params: { id: string; photoId: string } }>(
-  '/api/projects/:id/photos/:photoId/file',
+/** Sequentially convert HEIC + build thumbs/previews for all photos (avoids browser stampede). */
+app.post<{ Params: { id: string } }>(
+  '/api/projects/:id/photos/prepare',
   async (req, reply) => {
-    const photo = db
-      .prepare('SELECT * FROM photos WHERE id = ? AND project_id = ?')
-      .get(req.params.photoId, req.params.id) as
-      | { id: string; path: string; original_name: string }
-      | undefined
-    if (!photo) return reply.code(404).send({ error: 'Nie znaleziono' })
-    let abs = path.join(projectDir(req.params.id), photo.path)
-    if (!fs.existsSync(abs)) return reply.code(404).send({ error: 'Brak pliku' })
-
-    // Lazily convert already-uploaded HEIC so existing projects get previews too
-    try {
-      const jpegAbs = await ensureJpegPath(abs, photo.original_name)
-      if (jpegAbs !== abs) {
-        const jpegRel = path.relative(projectDir(req.params.id), jpegAbs)
-        db.prepare('UPDATE photos SET path = ? WHERE id = ?').run(jpegRel, photo.id)
-        abs = jpegAbs
-      }
-    } catch (err) {
-      req.log.error(err)
-      return reply.code(415).send({ error: 'Nie udało się odczytać pliku HEIC' })
+    if (!db.prepare('SELECT id FROM projects WHERE id = ?').get(req.params.id)) {
+      return reply.code(404).send({ error: 'Nie znaleziono' })
     }
+    const photos = db
+      .prepare('SELECT id, path, original_name FROM photos WHERE project_id = ?')
+      .all(req.params.id) as { id: string; path: string; original_name: string }[]
 
-    const outExt = path.extname(abs).toLowerCase()
-    const type =
-      outExt === '.png'
-        ? 'image/png'
-        : outExt === '.webp'
-          ? 'image/webp'
-          : outExt === '.gif'
-            ? 'image/gif'
-            : 'image/jpeg'
-    reply.type(type)
-    return reply.send(fs.createReadStream(abs))
+    let done = 0
+    const errors: string[] = []
+    for (const photo of photos) {
+      try {
+        await withImageQueue(async () => {
+          const abs = path.join(projectDir(req.params.id), photo.path)
+          if (!fs.existsSync(abs)) {
+            throw new Error('Brak pliku na dysku')
+          }
+          const prepared = await preparePhotoDerivatives(abs, photo.original_name)
+          const relative = path.relative(projectDir(req.params.id), prepared.full)
+          if (relative !== photo.path) {
+            db.prepare('UPDATE photos SET path = ? WHERE id = ?').run(
+              relative,
+              photo.id,
+            )
+          }
+        })
+      } catch (err) {
+        errors.push(
+          `${photo.original_name}: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
+      done += 1
+    }
+    touch(req.params.id)
+    return { total: photos.length, done, errors }
   },
 )
+
+app.get<{
+  Params: { id: string; photoId: string }
+  Querystring: { size?: string }
+}>('/api/projects/:id/photos/:photoId/file', async (req, reply) => {
+  const photo = db
+    .prepare('SELECT * FROM photos WHERE id = ? AND project_id = ?')
+    .get(req.params.photoId, req.params.id) as
+    | { id: string; path: string; original_name: string }
+    | undefined
+  if (!photo) return reply.code(404).send({ error: 'Nie znaleziono' })
+  const abs = path.join(projectDir(req.params.id), photo.path)
+  if (!fs.existsSync(abs)) return reply.code(404).send({ error: 'Brak pliku' })
+
+  const raw = (req.query.size || 'preview').toLowerCase()
+  const size: PhotoVariant =
+    raw === 'thumb' || raw === 'full' ? raw : 'preview'
+
+  try {
+    const resolved = await resolvePhotoVariant(abs, photo.original_name, size)
+    if (resolved.fullPath !== abs) {
+      const jpegRel = path.relative(
+        projectDir(req.params.id),
+        resolved.fullPath,
+      )
+      db.prepare('UPDATE photos SET path = ? WHERE id = ?').run(
+        jpegRel,
+        photo.id,
+      )
+    }
+    reply.header('Cache-Control', 'public, max-age=86400')
+    reply.type('image/jpeg')
+    return reply.send(fs.createReadStream(resolved.path))
+  } catch (err) {
+    req.log.error(err)
+    return reply.code(415).send({
+      error: `Nie udało się przygotować podglądu: ${err instanceof Error ? err.message : String(err)}`,
+    })
+  }
+})
 
 app.get<{ Params: { id: string } }>(
   '/api/projects/:id/background',

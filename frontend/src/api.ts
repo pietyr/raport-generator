@@ -173,8 +173,16 @@ export const api = {
       next: Photo | null
     }>(`/api/projects/${id}/tagging/next`),
   categories: () => request<Category[]>('/api/categories'),
-  photoUrl: (projectId: string, photoId: string) =>
-    `/api/projects/${projectId}/photos/${photoId}/file`,
+  photoUrl: (
+    projectId: string,
+    photoId: string,
+    size: 'thumb' | 'preview' | 'full' = 'preview',
+  ) => `/api/projects/${projectId}/photos/${photoId}/file?size=${size}`,
+  preparePhotos: (id: string) =>
+    request<{ total: number; done: number; errors: string[] }>(
+      `/api/projects/${id}/photos/prepare`,
+      { method: 'POST' },
+    ),
   backgroundUrl: (projectId: string) => `/api/projects/${projectId}/background`,
   generate: async (id: string) => {
     const res = await fetch(`/api/projects/${id}/generate`, { method: 'POST' })
